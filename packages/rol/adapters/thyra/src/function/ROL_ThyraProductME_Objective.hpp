@@ -83,6 +83,9 @@ public:
     if(!x_hasChanged(rol_x) &&  valueUpdated)
        return value_;
 
+    if(params != Teuchos::null)
+      params->set<bool>("Update Functional", !valueUpdated);
+
     const ThyraVector<Real>  & thyra_p = dynamic_cast<const ThyraVector<Real>&>(rol_x);
     Teuchos::RCP< Thyra::VectorBase<Real> > g = Thyra::createMember<Real>(thyra_model.get_g_space(g_index));
     Teuchos::RCP<const Thyra::ProductVectorBase<Real> > thyra_prodvec_p = Teuchos::rcp_dynamic_cast<const Thyra::ProductVectorBase<Real>>(thyra_p.getVector());
@@ -97,7 +100,10 @@ public:
 
     thyra_model.evalModel(inArgs, outArgs);
 
-    value_ = ::Thyra::get_ele(*g,0);
+    if(params->get<bool>("State Solve Converged"))
+      value_ = ::Thyra::get_ele(*g,0);
+    else
+      value_ = 1.0e100;
 
     valueUpdated = true;
 
