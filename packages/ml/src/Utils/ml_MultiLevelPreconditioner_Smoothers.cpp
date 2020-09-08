@@ -496,6 +496,21 @@ int ML_Epetra::MultiLevelPreconditioner::SetSmoothers(bool keepFineLevelSmoother
       // smoothers
       sprintf(msg,"Smoother (level %d) : ", currentLevel);
 
+      long int local_procs[2];
+      if (local[0] > 0)
+      {
+        local_procs[0] = 1;
+        local_procs[1] = 1;
+      }
+      else
+      {
+        local_procs[0] = 0;
+        local_procs[1] = 0;
+      }
+      long int global_min[2], global_max[2], total_procs[2];
+      if (minSizeForCoarse == -1) Comm().MinAll(local,global_min,2);
+      if (minSizeForCoarse == -1) Comm().MaxAll(local,global_max,2);
+      if (minSizeForCoarse == -1) Comm().SumAll(local_procs,total_procs,2);
       if (minSizeForCoarse == -1) Comm().SumAll(local,global,2);
 
       // minor information about matrix size on each level
@@ -503,6 +518,9 @@ int ML_Epetra::MultiLevelPreconditioner::SetSmoothers(bool keepFineLevelSmoother
         int i = std::cout.precision(0);
         std::cout.setf(std::ios::fixed);
         std::cout << msg << "# global rows = " << global[0]
+             << ", # global min rows = " << global_min[0]
+             << ", # global max rows = " << global_max[0]
+             << ", # total used procs = " << total_procs[0]
              << ", # estim. global nnz = " << global[1];
         std::cout.precision(2);
         std::cout << ", # nnz per row = " << ((double)global[1]) / ((double) global[0]) << std::endl;
