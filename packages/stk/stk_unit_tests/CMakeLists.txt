@@ -2,6 +2,7 @@ TRIBITS_SUBPACKAGE(Unit_tests)
 
 IF(Trilinos_ENABLE_STKSimd)
 TRIBITS_ADD_TEST_DIRECTORIES(stk_simd)
+TRIBITS_ADD_TEST_DIRECTORIES(stk_simd_old)
 ENDIF()
 
 IF(Trilinos_ENABLE_STKTransfer)
@@ -16,10 +17,6 @@ IF(Trilinos_ENABLE_STKNGP_TEST)
     
     IF(Trilinos_ENABLE_STKBalance)
     TRIBITS_ADD_TEST_DIRECTORIES(stk_balance)
-    ENDIF()
-    
-    IF(Trilinos_ENABLE_STKNGP)
-    TRIBITS_ADD_TEST_DIRECTORIES(stk_ngp)
     ENDIF()
     
     TRIBITS_ADD_TEST_DIRECTORIES(stk_ngp_test)
