@@ -68,7 +68,7 @@ namespace MueLu {
 #undef  SET_VALID_ENTRY
 
     validParamList->set< RCP<const FactoryBase> >("A",               Teuchos::null, "Generating factory of the matrix A");
-    validParamList->set< RCP<const FactoryBase> >("Coordinates",     Teuchos::null, "Generating factory for coorindates");
+    validParamList->set< RCP<const FactoryBase> >("Coordinates",     Teuchos::null, "Generating factory for coordinates");
 
     return validParamList;
   }
@@ -117,7 +117,7 @@ namespace MueLu {
       else if (lineOrientation=="coordinates")
         Zorientation_ = GRID_SUPPLIED;
       else
-        TEUCHOS_TEST_FOR_EXCEPTION(false, Exceptions::RuntimeError, "LineDetectionFactory: The parameter 'semicoarsen: line orientation' must be either 'vertical', 'horizontal' or 'coordinates'.");
+        TEUCHOS_TEST_FOR_EXCEPTION(true, Exceptions::RuntimeError, "LineDetectionFactory: The parameter 'linedetection: orientation' must be either 'vertical', 'horizontal' or 'coordinates'.");
     }
 
     //TEUCHOS_TEST_FOR_EXCEPTION(Zorientation_!=VERTICAL, Exceptions::RuntimeError, "LineDetectionFactory: The 'horizontal' or 'coordinates' have not been tested!!!. Please remove this exception check and carefully test these modes!");
@@ -183,7 +183,7 @@ namespace MueLu {
             NumZDir = NumNodesPerVertLine;
             GetOStream(Runtime1) << "Number of layers for line detection: " << NumZDir << " (information reconstructed from provided node coordinates)" << std::endl;
           } else {
-            TEUCHOS_TEST_FOR_EXCEPTION(false, Exceptions::RuntimeError, "LineDetectionFactory: BuildP: User has to provide valid number of layers (e.g. using the 'line detection: num layers' parameter).");
+            TEUCHOS_TEST_FOR_EXCEPTION(true, Exceptions::RuntimeError, "LineDetectionFactory: BuildP: User has to provide valid number of layers (e.g. using the 'line detection: num layers' parameter).");
           }
         } else {
           GetOStream(Runtime1) << "Number of layers for line detection: " << NumZDir << " (information provided by user through 'line detection: num layers')" << std::endl;
@@ -196,7 +196,7 @@ namespace MueLu {
         NumZDir = currentLevel.Get<LO>("NumZLayers", NoFactory::get()); //obtain info
         GetOStream(Runtime1) << "Number of layers for line detection: " << NumZDir << std::endl;
       } else {
-        TEUCHOS_TEST_FOR_EXCEPTION(false, Exceptions::RuntimeError, "LineDetectionFactory: BuildP: No NumZLayers variable found. This cannot be.");
+        TEUCHOS_TEST_FOR_EXCEPTION(true, Exceptions::RuntimeError, "LineDetectionFactory: BuildP: No NumZLayers variable found. This cannot be.");
       }
     }
 

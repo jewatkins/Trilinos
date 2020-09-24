@@ -101,6 +101,10 @@ namespace MueLu {
       */
     void Build(Level& currentLevel) const;
 
+  private:
+    void sort_indices(LO* indices, const ArrayRCP<const ArrayRCP<const coordinate_type>>& coords,
+        const LO numNodes, const int numDims, const int dim = 0) const;
+
     //@}
 
   }; //class PlaneDetectionFactory
