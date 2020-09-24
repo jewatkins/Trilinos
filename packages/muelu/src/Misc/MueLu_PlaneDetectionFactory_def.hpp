@@ -84,7 +84,7 @@ namespace MueLu {
     const LO dofsPerNode = A->GetFixedBlockSize();
     const LO numNodes    = A->getNodeNumRows() / dofsPerNode;
 
-    // Extract 3D coordinates on all nodes
+    // Extract 3D coordinates on all nodes (flip x and y)
     if (currentLevel.GetLevelID() == 0) {
       TEUCHOS_TEST_FOR_EXCEPTION(!currentLevel.IsAvailable("Coordinates"), Exceptions::RuntimeError,
           "PlaneDetectionFactory: Build: Coordinates must be supplied.");
@@ -97,14 +97,15 @@ namespace MueLu {
     TEUCHOS_TEST_FOR_EXCEPTION(coordsMV->getNumVectors() != numDims, Exceptions::RuntimeError,
         "PlaneDetectionFactory: Build: Three coordinates vectors must be supplied.");
     ArrayRCP<ArrayRCP<const coordinate_type>> coords(numDims);
+    const int order[] = {1, 0, 2};
     for (int dim = 0; dim < numDims; ++dim) {
-      coords[dim] = coordsMV->getData(dim);
-      TEUCHOS_TEST_FOR_EXCEPTION(coords[dim].is_null(), Exceptions::RuntimeError,
+      coords[order[dim]] = coordsMV->getData(dim);
+      TEUCHOS_TEST_FOR_EXCEPTION(coords[order[dim]].is_null(), Exceptions::RuntimeError,
           "PlaneDetectionFactory: Build: Coordinate vector " << dim << " is null.");
     }
 
-    // Find permutation of coordinate indices where the coordinates {x,y,z} are sorted smallest to largest.
-    // Assuming {x,y} are exactly the same along the z-direction (extruded mesh), 
+    // Find permutation of coordinate indices where the coordinates {y,x,z} are sorted smallest to largest.
+    // Assuming {y,x} are exactly the same along the z-direction (extruded mesh), 
     // the z coordinates will be contiguous for each line
     ArrayRCP<LO> indices = arcp<LO>(numNodes);
     LO* indPtr = indices.getRawPtr();
@@ -113,10 +114,10 @@ namespace MueLu {
 
     // Find number of planes by counting number of nodes along first line
     LO numPlanes = 0;
-    coordinate_type xfirst = coords[0][indices[0]], yfirst = coords[1][indices[0]];
+    coordinate_type yfirst = coords[0][indices[0]], xfirst = coords[1][indices[0]];
     for (LO node = 1; node < numNodes; ++node) {
-      coordinate_type x = coords[0][indices[node]], y = coords[1][indices[node]];
-      if (x != xfirst || y != yfirst) {
+      coordinate_type y = coords[0][indices[node]], x = coords[1][indices[node]];
+      if (y != yfirst || x != xfirst) {
         numPlanes = node;
         break;
       }
