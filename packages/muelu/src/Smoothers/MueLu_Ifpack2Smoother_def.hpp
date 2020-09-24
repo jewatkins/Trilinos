@@ -102,6 +102,7 @@ namespace MueLu {
                                                                             type_ == "LINESMOOTHING_BANDEDRELAXATION"        ||
                                                                             type_ == "LINESMOOTHING_BLOCK_RELAXATION"        ||
                                                                             type_ == "LINESMOOTHING_BLOCK RELAXATION"        ||
+                                                                            type_ == "PLANESMOOTHING_TEMP"                   ||
                                                                             type_ == "LINESMOOTHING_BLOCKRELAXATION"         ||
                                                                             type_ == "TOPOLOGICAL");
     this->declareConstructionOutcome(!isSupported, "Ifpack2 does not provide the smoother '" + type_ + "'.");
@@ -156,6 +157,10 @@ namespace MueLu {
       this->Input(currentLevel, "CoarseNumZLayers");            // necessary for fallback criterion
       this->Input(currentLevel, "LineDetection_VertLineIds");   // necessary to feed block smoother
     }
+    else if (type_ == "PLANESMOOTHING_TEMP") {
+      this->Input(currentLevel, "CoarseNumZLayers");            // necessary for fallback criterion
+      this->Input(currentLevel, "LineDetection_Layers");        // necessary to feed block smoother
+    }
     else if (type_ == "BLOCK RELAXATION" ||
              type_ == "BLOCK_RELAXATION" ||
              type_ == "BLOCKRELAXATION" ||
@@ -204,7 +209,8 @@ namespace MueLu {
              type_ == "LINESMOOTHING_BANDEDRELAXATION"       ||
              type_ == "LINESMOOTHING_BLOCK_RELAXATION"       ||
              type_ == "LINESMOOTHING_BLOCK RELAXATION"       ||
-             type_ == "LINESMOOTHING_BLOCKRELAXATION")
+             type_ == "LINESMOOTHING_BLOCKRELAXATION"        ||
+             type_ == "PLANESMOOTHING_TEMP")
       SetupLineSmoothing(currentLevel);
 
     else if (type_ == "BLOCK_RELAXATION" ||
@@ -447,7 +453,11 @@ namespace MueLu {
 
     LO CoarseNumZLayers = Factory::Get<LO>(currentLevel,"CoarseNumZLayers");
     if (CoarseNumZLayers > 0) {
-      Teuchos::ArrayRCP<LO> TVertLineIdSmoo = Factory::Get< Teuchos::ArrayRCP<LO> >(currentLevel, "LineDetection_VertLineIds");
+      Teuchos::ArrayRCP<LO> TVertLineIdSmoo;
+      if (type_ == "PLANESMOOTHING_TEMP")
+        TVertLineIdSmoo = Factory::Get< Teuchos::ArrayRCP<LO> >(currentLevel, "LineDetection_Layers");
+      else
+        TVertLineIdSmoo = Factory::Get< Teuchos::ArrayRCP<LO> >(currentLevel, "LineDetection_VertLineIds");
 
       // determine number of local parts
       LO maxPart = 0;
@@ -495,7 +505,8 @@ namespace MueLu {
 
       if (type_ == "LINESMOOTHING_BANDED_RELAXATION" ||
           type_ == "LINESMOOTHING_BANDED RELAXATION" ||
-          type_ == "LINESMOOTHING_BANDEDRELAXATION")
+          type_ == "LINESMOOTHING_BANDEDRELAXATION"  ||
+          type_ == "PLANESMOOTHING_TEMP")
         type_ = "BANDEDRELAXATION";
       else if (type_ == "LINESMOOTHING_TRIDI_RELAXATION"       ||
                type_ == "LINESMOOTHING_TRIDI RELAXATION"       ||
