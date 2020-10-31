@@ -3349,7 +3349,8 @@ namespace Tpetra {
        buffer_device_type>& permuteToLIDs,
      const Kokkos::DualView<
        const local_ordinal_type*,
-       buffer_device_type>& permuteFromLIDs) override;
+       buffer_device_type>& permuteFromLIDs,
+     const CombineMode CM) override;
 
     virtual void
     packAndPrepare
@@ -4304,7 +4305,7 @@ namespace Tpetra {
     /// <tt>impl_scalar_type</tt>, not \c Scalar.  This is because
     /// this method is <i>not</i> part of the public interface of
     /// CrsMatrix.
-    Kokkos::View<const impl_scalar_type*, execution_space, Kokkos::MemoryUnmanaged>
+    Kokkos::View<const impl_scalar_type*, device_type, Kokkos::MemoryUnmanaged>
     getRowView (const RowInfo& rowInfo) const;
 
     /// \brief Nonconst view of all entries (including extra space) in
@@ -4318,7 +4319,7 @@ namespace Tpetra {
     /// This method is \c const because it doesn't change allocations
     /// (and thus doesn't change pointers).  Consider the difference
     /// between <tt>const double*</tt> and <tt>double* const</tt>.
-    Kokkos::View<impl_scalar_type*, execution_space, Kokkos::MemoryUnmanaged>
+    Kokkos::View<impl_scalar_type*, device_type, Kokkos::MemoryUnmanaged>
     getRowViewNonConst (const RowInfo& rowInfo) const;
 
 
