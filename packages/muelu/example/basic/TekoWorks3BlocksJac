@@ -1,0 +1,577 @@
+// @HEADER
+// *****************************************************************************
+//      Teko: A package for block and physics based preconditioning
+//
+// Copyright 2010 NTESS and the Teko contributors.
+// SPDX-License-Identifier: BSD-3-Clause
+// *****************************************************************************
+// @HEADER
+
+// Teuchos includes /*@ \label{lned:being-includes} @*/
+#include "Teuchos_ConfigDefs.hpp"
+#include "Teuchos_GlobalMPISession.hpp"
+#include "Teuchos_RCP.hpp"
+#include "Teuchos_XMLParameterListHelpers.hpp"
+#include "Teuchos_DefaultComm.hpp"
+#include "Teuchos_AbstractFactoryStd.hpp"
+#include "Teuchos_CommandLineProcessor.hpp"
+
+// Tpetra includes
+#include "Tpetra_CrsMatrix.hpp"
+#include "Tpetra_Core.hpp"
+#include "MatrixMarket_Tpetra.hpp"
+
+// Teko-Package includes
+#include "Teko_Utilities.hpp"
+#include "Teko_InverseFactory.hpp"
+#include "Teko_InverseLibrary.hpp"
+#include "Teko_BlockedTpetraOperator.hpp"
+#include "Teko_TpetraInverseFactoryOperator.hpp"
+
+#include "Thyra_TpetraLinearOp.hpp"
+#include "Thyra_TpetraVectorSpace.hpp"
+
+#include "Stratimikos_DefaultLinearSolverBuilder.hpp"
+#include "Stratimikos_MueLuHelpers.hpp"
+
+// Belos includes
+#include "BelosConfigDefs.hpp"
+#include "BelosLinearProblem.hpp"
+#include "BelosBlockGmresSolMgr.hpp"
+#include "BelosSolverFactory.hpp"
+#include "BelosSolverFactory_Tpetra.hpp"
+#include "BelosSolverManager.hpp"
+#include "BelosLinearProblem.hpp"
+#include "BelosThyraAdapter.hpp"  // Requires Stratimikos...
+#include "Xpetra_TpetraMultiVector_decl.hpp"
+
+#include <iostream> /*@ \label{lned:end-includes} @*/
+
+// for simplicity
+using Teuchos::RCP;
+using Teuchos::rcp;
+using Teuchos::rcpFromRef;
+
+RCP<Teuchos::ParameterList> buildLibPL();
+
+// Generates proc-by-proc block gid lists
+template <class LO, class GO, class NO>
+std::vector<std::vector<GO>> read_block_gids(std::string partitionFile,
+                                             RCP<const Tpetra::Map<LO, GO, NO>> &rowMap) {
+  using V   = Tpetra::Vector<LO, LO, GO, NO>;
+  using CRS = Tpetra::CrsMatrix<LO, LO, GO, NO>;
+
+  RCP<V> pfile =
+      Tpetra::MatrixMarket::Reader<CRS>::readVectorFile(partitionFile, rowMap->getComm(), rowMap);
+
+  int num_blocks = 1 + pfile->normInf();
+
+  if (!rowMap->getComm()->getRank())
+    std::cout << "Reading partition file: Found " << num_blocks << " blocks" << std::endl;
+
+  std::vector<std::vector<GO>> block_gids(num_blocks);
+  auto vv = pfile->get1dView();
+  for (LO i = 0; i < (LO)vv.size(); i++) {
+    LO block_id = vv[i];
+    block_gids[block_id].push_back(rowMap->getGlobalElement(i));
+  }
+
+  return block_gids;
+}
+
+template <class SC, class LO, class GO, class NO>
+void ReadSplittingFromDisk(const std::string &partitionFile,
+                           const RCP<Tpetra::CrsMatrix<SC, LO, GO, NO>> &crsMat,
+                           RCP<Teko::TpetraHelpers::BlockedTpetraOperator> &A,
+                           std::vector<std::vector<GO>> &block_gids) {
+  // The format for the partition file is a number of lines of the form:
+  // proc_id block_id gid0, gid1,...
+  //
+  // Blocks do not need to be uniquely owned by a processor.
+
+  //  Each rank is going to read the file, one at a time (to avoid hammering on the disk)
+  auto comm                                 = crsMat->getRowMap()->getComm();
+  RCP<const Tpetra::Map<LO, GO, NO>> rowmap = crsMat->getRowMap();
+  block_gids                                = read_block_gids<LO, GO, NO>(partitionFile, rowmap);
+
+  RCP<Teko::TpetraHelpers::BlockedTpetraOperator> rA =
+      rcp(new Teko::TpetraHelpers::BlockedTpetraOperator(block_gids, crsMat));
+
+  A = rA;
+}
+
+template <class SC, class LO, class GO, class NO>
+Teuchos::ParameterList augment_muelu_parameters_with_coordinates(
+    const Teuchos::ParameterList &initial_params,
+    RCP<Tpetra::MultiVector<SC, LO, GO, NO>> &coords,
+    RCP<Tpetra::MultiVector<SC, LO, GO, NO>> &nullspace1,
+    RCP<Tpetra::MultiVector<SC, LO, GO, NO>> &nullspace2) {
+  Teuchos::ParameterList params_with_coords(initial_params);
+  if (!coords) return params_with_coords;
+
+  // auto xpetra_coords = Xpetra::toXpetra(coords);
+  // for (auto &&param : params_with_coords) {
+  //   if (!params_with_coords.isSublist(param.key)) continue;
+
+  //   auto &sublist = params_with_coords.sublist(param.key, true);
+  //   if (sublist.isParameter("Type") && sublist.get<std::string>("Type") == "MueLu") {
+  //     // auto &muelu_sublist = sublist.sublist("user data");
+  //     // muelu_sublist.set("Coordinates", xpetra_coords);
+  //     sublist.set("Coordinates", coords);
+  //     sublist.set("Nullspace", nullspace);
+  //   }
+  // }
+  for (auto &&param : params_with_coords) {
+    if (param.key == "MyMueLu1")
+    {
+      auto &sublist = params_with_coords.sublist(param.key, true);
+      sublist.set("Coordinates", coords);
+      sublist.set("Nullspace", nullspace1);
+    }
+    if (param.key == "MyMueLu2")
+    {
+      auto &sublist = params_with_coords.sublist(param.key, true);
+      sublist.set("Coordinates", coords);
+      sublist.set("Nullspace", nullspace2);
+    }
+  }
+
+  return params_with_coords;
+}
+
+
+template <class SC, class LO, class GO, class NO>
+int solve_tpetra(RCP<Tpetra::CrsMatrix<SC, LO, GO, NO>> &crsMat,
+                 RCP<Tpetra::Vector<SC, LO, GO, NO>> &b,
+                 RCP<Tpetra::MultiVector<SC, LO, GO, NO>> &coords,
+                 RCP<Tpetra::MultiVector<SC, LO, GO, NO>> &nullspace1,
+                 RCP<Tpetra::MultiVector<SC, LO, GO, NO>> &nullspace2,
+                 const std::string &partitionFile) {
+  typedef Tpetra::MultiVector<SC, LO, GO, NO> MV;
+  typedef Tpetra::Operator<SC, LO, GO, NO> OP;
+  auto comm = crsMat->getRowMap()->getComm();
+
+  // tell Stratimikos => Teko about MueLu
+  RCP<Stratimikos::DefaultLinearSolverBuilder> linearSolverBuilder =
+      Teuchos::rcp(new Stratimikos::DefaultLinearSolverBuilder);
+  Stratimikos::enableMueLu<SC, LO, GO, NO>(*linearSolverBuilder);
+
+  /////////////////////////////////////////////////////////
+  // Build the Thyra operators
+  /////////////////////////////////////////////////////////
+  RCP<Teko::TpetraHelpers::BlockedTpetraOperator> A;
+  RCP<Tpetra::Vector<SC, LO, GO, NO>> x = rcp(new Tpetra::Vector<SC, LO, GO, NO>(b->getMap()));
+
+  std::vector<std::vector<GO>> dof_block_gids;
+  ReadSplittingFromDisk<SC, LO, GO, NO>(partitionFile, crsMat, A, dof_block_gids);
+  x->putScalar(Teuchos::ScalarTraits<SC>::zero());
+
+  RCP<Thyra::MultiVectorBase<SC>> xt = Thyra::createVector(x);
+  RCP<Thyra::MultiVectorBase<SC>> bt = Thyra::createVector(b);
+
+  /////////////////////////////////////////////////////////
+  // Build the preconditioner
+  /////////////////////////////////////////////////////////
+
+
+  // Add coordinates if we need to (user app provides this information)
+  Teuchos::ParameterList paramsWithCoords =
+      augment_muelu_parameters_with_coordinates(*buildLibPL(), coords, nullspace1, nullspace2);
+
+  // build an InverseLibrary
+  RCP<Teko::InverseLibrary> invLib =
+      Teko::InverseLibrary::buildFromParameterList(paramsWithCoords, linearSolverBuilder);
+  // RCP<Teko::InverseFactory> inverse = invLib->getInverseFactory("Gauss-Seidel");
+  RCP<Teko::InverseFactory> inverse = invLib->getInverseFactory("Jacobi");
+  auto preconditioner = Teuchos::rcp(new Teko::TpetraHelpers::InverseFactoryOperator(inverse));
+  preconditioner->initInverse();
+
+  auto blocked_operator =
+      Teuchos::rcp_dynamic_cast<const Tpetra::Operator<Teko::ST, Teko::LO, Teko::GO, Teko::NT>>(A);
+  preconditioner->rebuildInverseOperator(blocked_operator);
+
+  // Setup the Belos solver
+  /////////////////////////////////////////////////////////
+
+  Teuchos::ParameterList belosList;
+  belosList.set("Num Blocks", 200);              // Maximum number of blocks in Krylov factorization
+  belosList.set("Block Size", 1);                // Blocksize to be used by iterative solver
+  belosList.set("Maximum Iterations", 200);      // Maximum number of iterations allowed
+  belosList.set("Maximum Restarts", 1);          // Maximum number of restarts allowed
+  belosList.set("Convergence Tolerance", 1e-6);  // Relative convergence tolerance requested
+  belosList.set(
+      "Verbosity",
+      33);  // Belos::Errors + Belos::Warnings + Belos::TimingDetails + Belos::StatusTestDetails );
+  belosList.set("Output Frequency", 1);
+  belosList.set("Output Style", 1);
+  belosList.set("Flexible Gmres", false);  // NOTE: required due to sub-iterative schemes
+
+  Teuchos::RCP<const OP> tpetraOp = crsMat;
+  auto problem                    = rcp(new Belos::LinearProblem<double, MV, OP>(tpetraOp, x, b));
+  problem->setRightPrec(preconditioner);
+  // problem->setLeftPrec(preconditioner);
+  problem->setProblem();
+
+  RCP<Belos::SolverManager<double, MV, OP>> solver =
+      rcp(new Belos::BlockGmresSolMgr<double, MV, OP>(problem, rcpFromRef(belosList)));
+
+  //
+  // Perform solve
+  //
+  Belos::ReturnType ret = solver->solve();
+
+  if (ret != Belos::Converged) {
+    std::cout << std::endl << "ERROR:  Belos did not converge!" << std::endl;
+    return -1;
+  } else {
+    std::cout << std::endl << " Belos converged" << std::endl;
+  }
+
+  return 0;
+}
+
+int main(int argc, char *argv[]) {
+  typedef double SC;
+
+  typedef Tpetra::Map<> TP_Map;
+  typedef Tpetra::Vector<SC> TP_Vec;
+  typedef Tpetra::MultiVector<SC> TP_MV;
+  typedef Tpetra::CrsMatrix<SC> TP_Crs;
+  // typedef Tpetra::Operator<SC>        TP_Op;
+
+  typedef TP_Vec::local_ordinal_type LO;
+  typedef TP_Vec::global_ordinal_type GO;
+  typedef TP_Vec::node_type NO;
+
+  // calls MPI_Init and MPI_Finalize
+  Teuchos::GlobalMPISession mpiSession(&argc, &argv);
+
+  // Parse CLI options
+  Teuchos::CommandLineProcessor clp(false);
+  std::string rhsFile;
+  clp.setOption("rhs", &rhsFile, "rhs data file");
+
+  std::string rowMapFile;
+  clp.setOption("rowmap", &rowMapFile, "map data file");
+  std::string matrixFile = "../data/nsjac.mm";
+  clp.setOption("matrix", &matrixFile, "matrix data file");
+
+  std::string partitionFile = "";
+  clp.setOption("partition", &partitionFile, "partition file which defines the blocks");
+
+  std::string coordsFile;
+  clp.setOption("coords", &coordsFile, "coords data file");
+
+  std::string coordsMapFile;
+  clp.setOption("coordsmap", &coordsMapFile, "coords data file");
+
+  std::string nullspace1File;
+  clp.setOption("nullspace1", &nullspace1File, "nullspace1 data file");
+  std::string nullspace2File;
+  clp.setOption("nullspace2", &nullspace2File, "nullspace2 data file");
+
+  clp.recogniseAllOptions(true);
+  switch (clp.parse(argc, argv)) {
+    case Teuchos::CommandLineProcessor::PARSE_HELP_PRINTED: return EXIT_SUCCESS;
+    case Teuchos::CommandLineProcessor::PARSE_ERROR:
+    case Teuchos::CommandLineProcessor::PARSE_UNRECOGNIZED_OPTION: return EXIT_FAILURE;
+    case Teuchos::CommandLineProcessor::PARSE_SUCCESSFUL: break;
+  }
+
+  /////////////////////////////////////////////////////////
+  // Build the Tpetra matrices and vectors
+  /////////////////////////////////////////////////////////
+
+  // read in the CRS matrix
+  RCP<TP_Crs> crsMat;
+  RCP<TP_Vec> rhs;
+  RCP<TP_MV> coords;
+  RCP<TP_MV> nullspace1;
+  RCP<TP_MV> nullspace2;
+  if (rowMapFile == "") {
+    crsMat =
+        Tpetra::MatrixMarket::Reader<TP_Crs>::readSparseFile(matrixFile, Tpetra::getDefaultComm());
+  } else {
+    RCP<const TP_Map> rowMap =
+        Tpetra::MatrixMarket::Reader<TP_Crs>::readMapFile(rowMapFile, Tpetra::getDefaultComm());
+    RCP<const TP_Map> colMap;
+    crsMat = Tpetra::MatrixMarket::Reader<TP_Crs>::readSparseFile(matrixFile, rowMap, colMap,
+                                                                  rowMap, rowMap);
+  }
+
+  auto rowMap = crsMat->getRowMap();
+
+  if (rhsFile != "") {
+    rhs = Tpetra::MatrixMarket::Reader<TP_Crs>::readVectorFile(rhsFile, rowMap->getComm(), rowMap);
+  }
+
+  if (coordsFile != "") {
+    RCP<const TP_Map> coordsMap = rowMap;
+    if (coordsMapFile != "")
+      coordsMap =
+          Tpetra::MatrixMarket::Reader<TP_Crs>::readMapFile(coordsMapFile, rowMap->getComm());
+    coords = Tpetra::MatrixMarket::Reader<TP_Crs>::readDenseFile(coordsFile, coordsMap->getComm(),
+                                                                 coordsMap);
+  }
+  if (nullspace1File != "") {
+    RCP<const TP_Map> nullspace1Map = rowMap;
+    nullspace1 = Tpetra::MatrixMarket::Reader<TP_Crs>::readDenseFile(nullspace1File, nullspace1Map->getComm(),
+                                                                 nullspace1Map);
+  }
+  if (nullspace2File != "") {
+    RCP<const TP_Map> nullspace2Map = rowMap;
+    nullspace2 = Tpetra::MatrixMarket::Reader<TP_Crs>::readDenseFile(nullspace2File, nullspace2Map->getComm(),
+                                                                 nullspace2Map);
+  }
+
+  // Sanity checks
+  if (rhs.is_null()) throw std::runtime_error("rhs is null");
+  if (crsMat.is_null()) throw std::runtime_error("crsMat is null");
+
+  auto comm = crsMat->getRowMap()->getComm();
+  int rv    = solve_tpetra<SC, LO, GO, NO>(crsMat, rhs, coords, nullspace1, nullspace2, partitionFile);
+
+  return rv;
+}
+
+RCP<Teuchos::ParameterList> buildLibPL() {
+  RCP<Teuchos::ParameterList> pl = rcp(new Teuchos::ParameterList());
+
+  {
+    Teuchos::ParameterList &sub_jac = pl->sublist("Jacobi");
+    sub_jac.set("Type", "Block Jacobi");
+    // sub_jac.set("Inverse Type", "MyIfpack2");
+    // sub_jac.set("Inverse Type", "MyMueLu");
+    // Teuchos::ParameterList &sub_muelu = pl->sublist("MyMueLu");
+    // sub_muelu.set("Type", "MueLu");
+    // multi block 1
+    sub_jac.set("Inverse Type 1", "MyMueLu1");
+    Teuchos::ParameterList &sub_muelu = pl->sublist("MyMueLu1");
+    sub_muelu.set("Type", "MueLu");
+
+
+    // Teuchos::ParameterList &sub_gs = pl->sublist("Gauss-Seidel");
+    // sub_gs.set("Type", "Block Gauss-Seidel");
+    // sub_gs.set("Use Upper Triangle", true);
+    // sub_gs.set("Inverse Type", "MyIfpack2");
+    // multi block 1
+    // sub_gs.set("Inverse Type 1", "MyMueLu1");
+    // Teuchos::ParameterList &sub_muelu = pl->sublist("MyMueLu1");
+    // sub_muelu.set("Type", "MueLu");
+
+    // Teuchos::ParameterList &sub_if2 = pl->sublist("MyIfpack2");
+    // sub_if2.set("Type", "Ifpack2");
+    // sub_if2.set("Overlap", 0);
+    // sub_if2.set("Prec Type", "RILUK");
+    // Teuchos::ParameterList &sub_riluk = sub_if2.sublist("Ifpack2 Settings");
+    // sub_riluk.set("fact: iluk level-of-fill", 0);
+
+    // Matrix sublist
+    Teuchos::ParameterList &sub_matrix = sub_muelu.sublist("Matrix");
+    sub_matrix.set("PDE equations", 2);
+    // sub_matrix.set("PDE equations", 4);
+
+    // Factories sublist
+    Teuchos::ParameterList &sub_factories = sub_muelu.sublist("Factories");
+
+    // myLineDetectionFact
+    Teuchos::ParameterList &sub_myLineDetectionFact = sub_factories.sublist("myLineDetectionFact");
+    sub_myLineDetectionFact.set("factory", "LineDetectionFactory");
+    sub_myLineDetectionFact.set("linedetection: orientation", "coordinates");
+
+    // mySemiCoarsenPFact1
+    Teuchos::ParameterList &sub_mySemiCoarsenPFact1 = sub_factories.sublist("mySemiCoarsenPFact1");
+    sub_mySemiCoarsenPFact1.set("factory", "SemiCoarsenPFactory");
+    sub_mySemiCoarsenPFact1.set("semicoarsen: coarsen rate", 14);
+
+    // UncoupledAggregationFact2
+    Teuchos::ParameterList &sub_UncoupledAggregationFact2 = sub_factories.sublist("UncoupledAggregationFact2");
+    sub_UncoupledAggregationFact2.set("factory", "UncoupledAggregationFactory");
+    sub_UncoupledAggregationFact2.set("aggregation: ordering", "graph");
+    sub_UncoupledAggregationFact2.set("aggregation: max selected neighbors", 0);
+    sub_UncoupledAggregationFact2.set("aggregation: min agg size", 3);
+    sub_UncoupledAggregationFact2.set("aggregation: phase3 avoid singletons", true);
+
+    // MyCoarseMap2
+    Teuchos::ParameterList &sub_MyCoarseMap2 = sub_factories.sublist("MyCoarseMap2");
+    sub_MyCoarseMap2.set("factory", "CoarseMapFactory");
+    sub_MyCoarseMap2.set("Aggregates", "UncoupledAggregationFact2");
+
+    // myTentativePFact2
+    Teuchos::ParameterList &sub_myTentativePFact2 = sub_factories.sublist("myTentativePFact2");
+    sub_myTentativePFact2.set("tentative: calculate qr", true);
+    sub_myTentativePFact2.set("factory", "TentativePFactory");
+    sub_myTentativePFact2.set("Aggregates", "UncoupledAggregationFact2");
+    sub_myTentativePFact2.set("CoarseMap", "MyCoarseMap2");
+
+    // mySaPFact2
+    Teuchos::ParameterList &sub_mySaPFact2 = sub_factories.sublist("mySaPFact2");
+    sub_mySaPFact2.set("sa: eigenvalue estimate num iterations", 10);
+    sub_mySaPFact2.set("sa: damping factor", 1.33333);
+    sub_mySaPFact2.set("factory", "SaPFactory");
+    sub_mySaPFact2.set("P", "myTentativePFact2");
+
+    // myTransferCoordinatesFact
+    Teuchos::ParameterList &sub_myTransferCoordinatesFact = sub_factories.sublist("myTransferCoordinatesFact");
+    sub_myTransferCoordinatesFact.set("factory", "CoordinatesTransferFactory");
+    sub_myTransferCoordinatesFact.set("CoarseMap", "MyCoarseMap2");
+    sub_myTransferCoordinatesFact.set("Aggregates", "UncoupledAggregationFact2");
+
+    // myTogglePFact
+    Teuchos::ParameterList &sub_myTogglePFact = sub_factories.sublist("myTogglePFact");
+    sub_myTogglePFact.set("factory", "TogglePFactory");
+    sub_myTogglePFact.set("semicoarsen: number of levels", 2);
+    
+    // TransferFactories sublist
+    Teuchos::ParameterList &sub_transferFactories = sub_myTogglePFact.sublist("TransferFactories");
+    sub_transferFactories.set("P1", "mySemiCoarsenPFact1");
+    sub_transferFactories.set("P2", "mySaPFact2");
+    sub_transferFactories.set("Ptent1", "mySemiCoarsenPFact1");
+    sub_transferFactories.set("Ptent2", "myTentativePFact2");
+    sub_transferFactories.set("Nullspace1", "mySemiCoarsenPFact1");
+    sub_transferFactories.set("Nullspace2", "myTentativePFact2");
+
+    // myRestrictorFact
+    Teuchos::ParameterList &sub_myRestrictorFact = sub_factories.sublist("myRestrictorFact");
+    sub_myRestrictorFact.set("factory", "TransPFactory");
+    sub_myRestrictorFact.set("P", "myTogglePFact");
+
+    // myToggleTransferCoordinatesFact
+    Teuchos::ParameterList &sub_myToggleTransferCoordinatesFact = sub_factories.sublist("myToggleTransferCoordinatesFact");
+    sub_myToggleTransferCoordinatesFact.set("factory", "ToggleCoordinatesTransferFactory");
+    sub_myToggleTransferCoordinatesFact.set("Chosen P", "myTogglePFact");
+    
+    // TransferFactories sublist
+    Teuchos::ParameterList &sub_transferFactoriesToggle = sub_myToggleTransferCoordinatesFact.sublist("TransferFactories");
+    sub_transferFactoriesToggle.set("Coordinates1", "mySemiCoarsenPFact1");
+    sub_transferFactoriesToggle.set("Coordinates2", "myTransferCoordinatesFact");
+
+    // myRAPFact
+    Teuchos::ParameterList &sub_myRAPFact = sub_factories.sublist("myRAPFact");
+    sub_myRAPFact.set("factory", "RAPFactory");
+    sub_myRAPFact.set("P", "myTogglePFact");
+    sub_myRAPFact.set("R", "myRestrictorFact");
+    
+    // TransferFactories sublist
+    Teuchos::ParameterList &sub_transferFactoriesRAP = sub_myRAPFact.sublist("TransferFactories");
+    sub_transferFactoriesRAP.set("For Coordinates", "myToggleTransferCoordinatesFact");
+
+    // myRepartitionHeuristicFact
+    Teuchos::ParameterList &sub_myRepartitionHeuristicFact = sub_factories.sublist("myRepartitionHeuristicFact");
+    sub_myRepartitionHeuristicFact.set("factory", "RepartitionHeuristicFactory");
+    sub_myRepartitionHeuristicFact.set("A", "myRAPFact");
+    sub_myRepartitionHeuristicFact.set("repartition: min rows per proc", 3000);
+    sub_myRepartitionHeuristicFact.set("repartition: max imbalance", 1.327);
+    sub_myRepartitionHeuristicFact.set("repartition: start level", 3);
+
+    // myZoltanInterface
+    Teuchos::ParameterList &sub_myZoltanInterface = sub_factories.sublist("myZoltanInterface");
+    sub_myZoltanInterface.set("factory", "ZoltanInterface");
+    sub_myZoltanInterface.set("A", "myRAPFact");
+    sub_myZoltanInterface.set("Coordinates", "myToggleTransferCoordinatesFact");
+    sub_myZoltanInterface.set("number of partitions", "myRepartitionHeuristicFact");
+
+    // myRepartitionFact
+    Teuchos::ParameterList &sub_myRepartitionFact = sub_factories.sublist("myRepartitionFact");
+    sub_myRepartitionFact.set("factory", "RepartitionFactory");
+    sub_myRepartitionFact.set("A", "myRAPFact");
+    sub_myRepartitionFact.set("Partition", "myZoltanInterface");
+    sub_myRepartitionFact.set("repartition: remap parts", true);
+    sub_myRepartitionFact.set("number of partitions", "myRepartitionHeuristicFact");
+
+    // myRebalanceProlongatorFact
+    Teuchos::ParameterList &sub_myRebalanceProlongatorFact = sub_factories.sublist("myRebalanceProlongatorFact");
+    sub_myRebalanceProlongatorFact.set("factory", "RebalanceTransferFactory");
+    sub_myRebalanceProlongatorFact.set("type", "Interpolation");
+    sub_myRebalanceProlongatorFact.set("P", "myTogglePFact");
+    sub_myRebalanceProlongatorFact.set("Coordinates", "myToggleTransferCoordinatesFact");
+    sub_myRebalanceProlongatorFact.set("Nullspace", "myTogglePFact");
+
+    // myRebalanceRestrictionFact
+    Teuchos::ParameterList &sub_myRebalanceRestrictionFact = sub_factories.sublist("myRebalanceRestrictionFact");
+    sub_myRebalanceRestrictionFact.set("factory", "RebalanceTransferFactory");
+    sub_myRebalanceRestrictionFact.set("type", "Restriction");
+    sub_myRebalanceRestrictionFact.set("R", "myRestrictorFact");
+
+    // myRebalanceAFact
+    Teuchos::ParameterList &sub_myRebalanceAFact = sub_factories.sublist("myRebalanceAFact");
+    sub_myRebalanceAFact.set("factory", "RebalanceAcFactory");
+    sub_myRebalanceAFact.set("A", "myRAPFact");
+    
+    // TransferFactories sublist (empty)
+    Teuchos::ParameterList &sub_transferFactoriesRebalanceA = sub_myRebalanceAFact.sublist("TransferFactories");
+
+    // mySmoother1
+    Teuchos::ParameterList &sub_mySmoother1 = sub_factories.sublist("mySmoother1");
+    sub_mySmoother1.set("factory", "TrilinosSmoother");
+    // sub_mySmoother1.set("type", "LINESMOOTHING_TRIDIRELAXATION");
+    sub_mySmoother1.set("type", "LINESMOOTHING_BANDEDRELAXATION");
+    sub_mySmoother1.set("smoother: pre or post", "both");
+    
+    // ParameterList sublist for mySmoother1
+    Teuchos::ParameterList &sub_paramListSmoother1 = sub_mySmoother1.sublist("ParameterList");
+    sub_paramListSmoother1.set("relaxation: type", "Gauss-Seidel");
+    sub_paramListSmoother1.set("relaxation: sweeps", 1);
+    sub_paramListSmoother1.set("relaxation: damping factor", 1.0);
+    // sub_paramListSmoother1.set("block relaxation: decouple dofs", true);
+    // sub_paramListSmoother1.set("partitioner: PDE equations", 2);
+    // sub_paramListSmoother1.set("partitioner: decouple lines", true); // Commented out
+
+    // mySmoother4
+    Teuchos::ParameterList &sub_mySmoother4 = sub_factories.sublist("mySmoother4");
+    sub_mySmoother4.set("factory", "TrilinosSmoother");
+    sub_mySmoother4.set("type", "RELAXATION");
+    sub_mySmoother4.set("smoother: pre or post", "pre");
+    
+    // ParameterList sublist for mySmoother4
+    Teuchos::ParameterList &sub_paramListSmoother4 = sub_mySmoother4.sublist("ParameterList");
+    sub_paramListSmoother4.set("relaxation: type", "Gauss-Seidel");
+    sub_paramListSmoother4.set("relaxation: sweeps", 4);
+    sub_paramListSmoother4.set("relaxation: damping factor", 1.0);
+
+    // Hierarchy sublist
+    Teuchos::ParameterList &sub_hierarchy = sub_muelu.sublist("Hierarchy");
+    sub_hierarchy.set("max levels", 7);
+    //sub_hierarchy.set("coarse: max size", 2000);
+    sub_hierarchy.set("coarse: max size", 200);
+    sub_hierarchy.set("verbosity", "medium");
+
+    // Finest sublist
+    Teuchos::ParameterList &sub_finest = sub_hierarchy.sublist("Finest");
+    sub_finest.set("Smoother", "mySmoother1");
+    sub_finest.set("CoarseSolver", "mySmoother4");
+    sub_finest.set("P", "myRebalanceProlongatorFact");
+    sub_finest.set("Nullspace", "myRebalanceProlongatorFact");
+    sub_finest.set("CoarseNumZLayers", "myLineDetectionFact");
+    sub_finest.set("LineDetection_Layers", "myLineDetectionFact");
+    sub_finest.set("LineDetection_VertLineIds", "myLineDetectionFact");
+    sub_finest.set("A", "myRebalanceAFact");
+    sub_finest.set("Coordinates", "myRebalanceProlongatorFact");
+    sub_finest.set("Importer", "myRepartitionFact");
+
+    // All sublist
+    Teuchos::ParameterList &sub_all = sub_hierarchy.sublist("All");
+    sub_all.set("startLevel", 1);
+    sub_all.set("Smoother", "mySmoother4");
+    sub_all.set("CoarseSolver", "mySmoother4");
+    sub_all.set("P", "myRebalanceProlongatorFact");
+    sub_all.set("Nullspace", "myRebalanceProlongatorFact");
+    sub_all.set("CoarseNumZLayers", "myLineDetectionFact");
+    sub_all.set("LineDetection_Layers", "myLineDetectionFact");
+    sub_all.set("LineDetection_VertLineIds", "myLineDetectionFact");
+    sub_all.set("A", "myRebalanceAFact");
+    sub_all.set("Coordinates", "myRebalanceProlongatorFact");
+    sub_all.set("Importer", "myRepartitionFact");
+
+    // multi block 2
+    sub_jac.set("Inverse Type 2", "MyMueLu2");
+    sub_jac.set("Inverse Type 3", "MyMueLu2");
+    // sub_gs.set("Inverse Type 2", "MyMueLu2");
+    // sub_gs.set("Inverse Type 3", "MyMueLu2");
+    Teuchos::ParameterList &sub_muelu2 = pl->sublist("MyMueLu2");
+    sub_muelu2 = sub_muelu;
+    Teuchos::ParameterList &sub_matrix2 = sub_muelu2.sublist("Matrix");
+    sub_matrix2.set("PDE equations", 1);
+  }
+  return pl;
+}
